@@ -1,0 +1,31 @@
+# Trading defaults - copied into the database on FIRST run only.
+# After that, change settings live from Telegram (/mode, /size, /caps, ...).
+
+mode: notify            # notify (alerts only) -> confirm (tap to copy) -> auto. Start with notify!
+
+sizing:
+  mode: fixed           # fixed | percent | mirror
+  value: 0.05           # fixed: SOL per buy · percent: % of my SOL · mirror: multiplier % (100 = 1x)
+
+slippage_bps: 500       # 500 = 5%
+min_trade_sol: 0.01     # skip buys smaller than this
+max_trade_sol: 0.5      # never spend more than this on one buy
+max_price_impact_pct: 15
+priority_fee_max_lamports: 2000000   # 0.002 SOL cap on priority fee per swap
+daily_loss_limit_pct: 20             # auto-pause if portfolio drops 20% in a UTC day (0 = off)
+tp_pct: 0               # auto take-profit at +X% (0 = off)
+sl_pct: 0               # auto stop-loss at -X% (0 = off)
+confirm_timeout_s: 30
+copy_sells: true        # mirror leader sells (same fraction of our position)
+
+notify:
+  daily_summary_hour_utc: -1   # 0-23 to get a daily summary, -1 = off
+
+# Wallets to copy. You can also add them later with /addleader.
+leaders: []
+#  - address: <leader wallet address>
+#    label: "Whale A"
+
+blacklist: []
+#  - mint: <token mint>
+#    reason: "rug"

@@ -1,0 +1,30 @@
+[Unit]
+Description=Solana Telegram copy-trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=copybot
+WorkingDirectory=/home/copybot/TGBOT
+EnvironmentFile=/home/copybot/TGBOT/.env
+ExecStart=/home/copybot/TGBOT/.venv/bin/python run.py
+Restart=always
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/copybot/TGBOT/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
