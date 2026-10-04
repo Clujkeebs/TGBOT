@@ -31,10 +31,19 @@ HELP = """<b>Solana copy-trading bot</b>
 /exportkey – reveal private key (to import in Phantom)
 
 <b>Leaders</b>
-/leaders – tracked wallets &amp; stats
-/addleader &lt;address&gt; [label]
+/leaders – tracked wallets, P/L, win rate
+/addleader &lt;addr&gt; [label] [&lt;addr2&gt; [label2] …] – follow one or many
 /rmleader &lt;address|label&gt;
 /weight &lt;address|label&gt; &lt;pct&gt; – per-leader size multiplier
+/leadermode &lt;address|label&gt; auto|confirm|notify|default
+/leadermax &lt;address|label&gt; &lt;SOL&gt; – per-leader max buy (0 = none)
+
+<b>AI manager</b>
+Just type a message to talk to the AI, e.g. "how are my leaders doing?"
+/ai – AI status · /ai review – review now
+/ai advise|manage|off – suggest changes / apply them / disable
+/ai screen on|off – AI checks every buy before it executes
+/ai every &lt;hours&gt; · /ai cap &lt;SOL&gt; · /ai reset
 
 <b>Trading settings</b>
 /mode auto|confirm|notify
@@ -62,12 +71,13 @@ HELP = """<b>Solana copy-trading bot</b>
 • <code>fixed 0.05</code> – every buy is 0.05 SOL
 • <code>percent 5</code> – 5% of my SOL balance per buy
 • <code>mirror 100</code> – same % of my SOL as the leader used of theirs (200 = 2×)
-Sells always mirror the fraction the leader sold."""
+Sells mirror the fraction sold by the leader who opened the position.
+All leaders are followed at the same time; trades are processed in parallel."""
 
 BOT_COMMANDS = [
     ("status", "Overview"), ("wallet", "Wallet address & balance"), ("balance", "Holdings"),
     ("positions", "Open positions & P/L"), ("leaders", "Tracked leaders"), ("mode", "auto|confirm|notify"),
-    ("size", "Sizing mode"), ("pause", "Stop copying"), ("resume", "Resume copying"), ("help", "All commands"),
+    ("size", "Sizing mode"), ("ai", "AI manager"), ("pause", "Stop copying"), ("resume", "Resume copying"), ("help", "All commands"),
 ]
 
 
@@ -99,8 +109,9 @@ def _yes_no(b: bool) -> str:
 class TelegramUI:
     def __init__(self, bot: Bot, engine: CopyEngine, wallet: WalletManager, owner_ids: set[int],
                  on_leaders_changed: Callable[[], Awaitable[None]] | None = None,
-                 hot_wallet_max_sol: float = 5.0, ingest_desc: str = ""):
+                 hot_wallet_max_sol: float = 5.0, ingest_desc: str = "", ai=None):
         self.bot = bot
+        self.ai = ai
         self.engine = engine
         self.db = engine.db
         self.wallet = wallet
@@ -127,12 +138,14 @@ class TelegramUI:
             "copysells": self.cmd_copysells, "timeout": self.cmd_timeout, "blacklist": self.cmd_blacklist,
             "pause": self.cmd_pause, "resume": self.cmd_resume, "positions": self.cmd_positions,
             "pnl": self.cmd_positions, "buy": self.cmd_buy, "sell": self.cmd_sell, "trades": self.cmd_trades,
-            "summary": self.cmd_summary,
+            "summary": self.cmd_summary, "leadermode": self.cmd_leadermode, "leadermax": self.cmd_leadermax,
+            "ai": self.cmd_ai,
         }
         for name, fn in cmds.items():
             r.message.register(self._guard(fn), Command(name))
         r.callback_query.register(self.on_confirm, F.data.startswith("cf:"))
         r.callback_query.register(self.on_action, F.data.startswith("act:"))
+        r.callback_query.register(self.on_ai_proposal, F.data.startswith("ai:"))
         r.message.register(self.on_unknown)
 
     def _guard(self, fn):
@@ -219,7 +232,27 @@ class TelegramUI:
         await call.answer(text)
 
     async def on_unknown(self, message: Message) -> None:
-        await message.answer("Unknown command. /help lists everything.")
+        text = (message.text or "").strip()
+        if not text or text.startswith("/") or self.ai is None:
+            hint = "" if self.ai else " (Set ANTHROPIC_API_KEY to chat with the AI manager.)"
+            await message.answer("Unknown command. /help lists everything." + hint)
+            return
+        await self.bot.send_chat_action(message.chat.id, "typing")
+        try:
+            reply = await self.ai.chat(text[:4000])
+        except Exception as e:  # noqa: BLE001
+            log.exception("AI chat failed")
+            reply = f"AI error: {e}"
+        for i in range(0, len(reply), 3900):
+            await message.answer("🤖 " + esc(reply[i:i + 3900]), disable_web_page_preview=True)
+
+    async def on_ai_proposal(self, call: CallbackQuery) -> None:
+        _, yn, token = call.data.split(":", 2)
+        if self.ai is None:
+            await call.answer("AI disabled")
+            return
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.answer(await self.ai.apply_proposal(token, yn == "y"))
 
     # ================================================================== #
     # Commands
@@ -246,7 +279,8 @@ class TelegramUI:
             f"Max impact {cfg.max_price_impact_pct:g}% · Priority ≤{cfg.priority_fee_max_lamports / 1e9:g} SOL\n"
             f"TP {cfg.tp_pct:g}% / SL {cfg.sl_pct:g}% · Daily loss limit {cfg.daily_loss_limit_pct:g}%\n"
             f"Copy sells: {_yes_no(cfg.copy_sells)} · Confirm timeout {cfg.confirm_timeout_s}s\n"
-            f"Leaders: {len(leaders)} active · Ingest: {self.ingest_desc}\n"
+            f"Leaders: {len(leaders)} active (all copied in parallel) · Ingest: {self.ingest_desc}\n"
+            f"AI: {(cfg.ai_autonomy + (', screening buys' if cfg.ai_screen_buys else '')) if self.ai else 'disabled'}\n"
             f"Wallet: <code>{self.wallet.pubkey}</code> ({sol:.4f} SOL)\n"
             f"Uptime {up // 3600}h{up % 3600 // 60:02d}m · txs {st['leader_txs']} · swaps {st['swaps_detected']} · "
             f"copies {st['copies']} · failed {st['failures']}"
@@ -309,27 +343,75 @@ class TelegramUI:
         lines = ["<b>Leaders</b>"]
         for ld in leaders:
             last = ld.last_trade_at.strftime("%m-%d %H:%M") if ld.last_trade_at else "never"
-            w = f" · weight {ld.weight_pct:g}%" if ld.weight_pct != 100 else ""
+            extra = []
+            if ld.weight_pct != 100:
+                extra.append(f"weight {ld.weight_pct:g}%")
+            if ld.mode:
+                extra.append(f"mode {ld.mode}")
+            if ld.max_sol:
+                extra.append(f"max {ld.max_sol:g} SOL")
+            closed = ld.wins + ld.losses
+            wr = f" · win {ld.wins / closed * 100:.0f}% of {closed}" if closed else ""
             lines.append(f"{'🟢' if ld.is_active else '⚪'} <b>{esc(ld.label) or '—'}</b> <code>{ld.address}</code>\n"
-                         f"   {ld.trades_seen} trades ({ld.buys}B/{ld.sells}S) · last {last}{w}")
+                         f"   {ld.trades_seen} trades ({ld.buys}B/{ld.sells}S) · last {last}\n"
+                         f"   copied {ld.copied_sol:.3f} SOL · P/L <b>{ld.realized_pnl_sol:+.4f}</b>{wr}"
+                         + (f"\n   {' · '.join(extra)}" if extra else "")
+                         + (f"\n   🤖 <i>{esc(ld.ai_note[:150])}</i>" if ld.ai_note else ""))
         await m.answer("\n".join(lines))
 
     async def cmd_addleader(self, m: Message, args: list[str]) -> None:
-        if not args or not is_valid_pubkey(args[0]):
-            raise ValueError("Usage: /addleader <wallet address> [label]")
-        addr, label = args[0], " ".join(args[1:])[:64]
-        if addr == self.wallet.pubkey:
-            raise ValueError("That's the bot's own wallet")
-        async with self.db.session() as s:
-            ld = await self._find_leader(s, addr)
-            if ld:
-                ld.is_active = True
-                if label:
-                    ld.label = label
+        entries: list[list[str]] = []
+        for a in args:
+            if is_valid_pubkey(a):
+                entries.append([a])
+            elif entries:
+                entries[-1].append(a)
             else:
-                s.add(Leader(address=addr, label=label))
+                raise ValueError(f"'{a}' is not a wallet address")
+        if not entries:
+            raise ValueError("Usage: /addleader <address> [label] [<address2> [label2] ...]")
+        added = []
+        async with self.db.session() as s:
+            for addr, *words in entries:
+                if addr == self.wallet.pubkey:
+                    raise ValueError("That's the bot's own wallet")
+                label = " ".join(words)[:64]
+                ld = await self._find_leader(s, addr)
+                if ld:
+                    ld.is_active = True
+                    if label:
+                        ld.label = label
+                else:
+                    s.add(Leader(address=addr, label=label))
+                added.append(f"<code>{addr}</code> {esc(label)}")
         await self._leaders_changed()
-        await m.answer(f"✅ Following <code>{addr}</code> {esc(label)}\nNew trades from now on will be copied.")
+        total = len(await self.db.active_leaders())
+        await m.answer(f"✅ Following {len(added)} wallet(s):\n" + "\n".join(added)
+                       + f"\n\n{total} leader(s) active. New trades from now on will be copied.")
+
+    async def cmd_leadermode(self, m: Message, args: list[str]) -> None:
+        if len(args) < 2 or args[-1].lower() not in ("auto", "confirm", "notify", "default"):
+            raise ValueError("Usage: /leadermode <address|label> auto|confirm|notify|default")
+        mode = args[-1].lower()
+        async with self.db.session() as s:
+            ld = await self._find_leader(s, " ".join(args[:-1]))
+            if not ld:
+                raise ValueError("Leader not found")
+            ld.mode = "" if mode == "default" else mode
+        await m.answer(f"✅ Mode for this leader: {mode}")
+
+    async def cmd_leadermax(self, m: Message, args: list[str]) -> None:
+        if len(args) < 2:
+            raise ValueError("Usage: /leadermax <address|label> <SOL>  (0 = no per-leader cap)")
+        v = _parse_float(args[-1])
+        if v < 0:
+            raise ValueError("Must be ≥ 0")
+        async with self.db.session() as s:
+            ld = await self._find_leader(s, " ".join(args[:-1]))
+            if not ld:
+                raise ValueError("Leader not found")
+            ld.max_sol = v
+        await m.answer(f"✅ Per-leader max: {v:g} SOL" if v else "✅ Per-leader max removed")
 
     async def cmd_rmleader(self, m: Message, args: list[str]) -> None:
         if not args:
@@ -396,7 +478,8 @@ class TelegramUI:
         lo, hi = _parse_float(args[0]), _parse_float(args[1])
         if lo <= 0 or hi < lo:
             raise ValueError("Need 0 < min ≤ max")
-        await self.db.update_config(min_trade_sol=lo, max_trade_sol=hi)
+        cfg = await self.db.get_config()
+        await self.db.update_config(min_trade_sol=lo, max_trade_sol=hi, ai_max_trade_sol=max(cfg.ai_max_trade_sol, hi))
         await m.answer(f"✅ Trade size limits: {lo:g}–{hi:g} SOL")
 
     async def cmd_slippage(self, m: Message, args: list[str]) -> None:
@@ -556,6 +639,54 @@ class TelegramUI:
             lines.append(f"{icons.get(t.status, '•')} {t.created_at:%m-%d %H:%M} {t.origin} {t.side.upper()} "
                          f"<code>{short(t.token_mint)}</code>{our}{link}{note}")
         await m.answer("\n".join(lines), disable_web_page_preview=True)
+
+    async def cmd_ai(self, m: Message, args: list[str]) -> None:
+        if self.ai is None:
+            raise ValueError("AI is disabled. Add ANTHROPIC_API_KEY to .env and restart.")
+        sub = args[0].lower() if args else ""
+        if sub in ("advise", "manage", "off"):
+            await self.db.update_config(ai_autonomy=sub)
+            await m.answer({"advise": "✅ AI will review leaders and send you proposals to approve.",
+                            "manage": "✅ AI will apply leader/setting changes itself and report them. "
+                                      "It still can't withdraw, trade, switch to auto mode or exceed /ai cap.",
+                            "off": "✅ AI reviews and buy screening are off (chat still works)."}[sub])
+        elif sub == "screen" and len(args) == 2 and args[1].lower() in ("on", "off"):
+            await self.db.update_config(ai_screen_buys=args[1].lower() == "on")
+            await m.answer(f"✅ AI buy screening {args[1].lower()}")
+        elif sub == "every" and len(args) == 2:
+            h = _parse_float(args[1])
+            if not 0 <= h <= 168:
+                raise ValueError("0–168 hours (0 = no scheduled reviews)")
+            await self.db.update_config(ai_review_hours=h)
+            await m.answer(f"✅ AI review every {h:g}h" if h else "✅ Scheduled AI reviews off")
+        elif sub == "cap" and len(args) == 2:
+            v = _parse_float(args[1])
+            if v <= 0:
+                raise ValueError("Must be > 0")
+            cfg = await self.db.get_config()
+            upd = {"ai_max_trade_sol": v}
+            if cfg.max_trade_sol > v:
+                upd["max_trade_sol"] = v
+            await self.db.update_config(**upd)
+            await m.answer(f"✅ The AI can never set the max trade size above {v:g} SOL")
+        elif sub == "review":
+            await m.answer("🤖 Reviewing leaders and positions…")
+            self.engine.spawn(self.ai.review())
+        elif sub == "reset":
+            self.ai.reset_chat()
+            await m.answer("✅ AI conversation cleared")
+        elif not sub:
+            cfg = await self.db.get_config()
+            st = self.ai.stats
+            await m.answer(
+                f"🤖 <b>AI manager</b> ({esc(self.ai.model)})\n"
+                f"Autonomy: <b>{cfg.ai_autonomy}</b> · Buy screen: {_yes_no(cfg.ai_screen_buys)}\n"
+                f"Review every {cfg.ai_review_hours:g}h · Max trade ceiling {cfg.ai_max_trade_sol:g} SOL\n"
+                f"Screened {st['screens']} buys ({st['rejects']} rejected, {st['reduces']} reduced) · "
+                f"{st['reviews']} reviews · {st['errors']} errors\n\n"
+                "Type any message to talk to it.")
+        else:
+            raise ValueError("Usage: /ai [advise|manage|off|review|reset] · /ai screen on|off · /ai every <h> · /ai cap <SOL>")
 
     async def cmd_summary(self, m: Message, args: list[str]) -> None:
         if args:

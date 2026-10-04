@@ -29,3 +29,10 @@ leaders: []
 blacklist: []
 #  - mint: <token mint>
 #    reason: "rug"
+
+# AI manager (needs ANTHROPIC_API_KEY in .env)
+ai:
+  screen_buys: true     # Claude checks every copy buy (token safety + leader record) before it executes
+  autonomy: advise      # off | advise (proposes changes, you tap Apply) | manage (applies changes itself)
+  review_hours: 6       # how often the AI reviews leaders and positions (0 = only on /ai review)
+  max_trade_sol: 0      # hard ceiling the AI can never raise max_trade_sol above (0 = max_trade_sol)

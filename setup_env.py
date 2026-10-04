@@ -42,12 +42,13 @@ def main() -> None:
         webhook_url = f"{domain}/webhook/{secrets.token_urlsafe(24)}"
         webhook_secret = secrets.token_urlsafe(32)
     jup = ask("\n5) Jupiter API key from portal.jup.ag (optional)", required=False)
+    ai_key = ask("\n6) Anthropic API key for the AI manager, from console.anthropic.com (optional)", required=False)
     fernet = Fernet.generate_key().decode()
 
     ENV.write_text(
         f"TELEGRAM_BOT_TOKEN={token}\nTELEGRAM_CHAT_ID={chat}\nSOLANA_RPC_URL={rpc}\nFERNET_KEY={fernet}\n"
         f"INGEST_MODE={mode}\nPOLL_INTERVAL_S=2\nHELIUS_API_KEY={helius_key}\nHELIUS_WEBHOOK_URL={webhook_url}\n"
-        f"HELIUS_WEBHOOK_SECRET={webhook_secret}\nJUPITER_API_KEY={jup}\n"
+        f"HELIUS_WEBHOOK_SECRET={webhook_secret}\nJUPITER_API_KEY={jup}\nANTHROPIC_API_KEY={ai_key}\n"
         f"DATABASE_URL=sqlite+aiosqlite:///./data/copybot.db\nLOG_LEVEL=INFO\nHOT_WALLET_MAX_SOL=5\n",
         encoding="utf-8",
     )

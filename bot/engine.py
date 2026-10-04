@@ -35,6 +35,7 @@ class Decision:
     ok: bool
     sol_amount: float = 0.0
     reason: str = ""
+    ai_note: str = ""
 
 
 def size_buy(cfg: BotConfig, leader_sol_value: float, leader_pre_sol: float, my_sol: float,
@@ -79,6 +80,7 @@ class CopyEngine:
         self.wallet = wallet
         self.jup = jupiter
         self.notify = notifier
+        self.ai = None  # optional AIManager, attached by run.py
         self._mint_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._timeouts: dict[int, asyncio.Task] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -129,7 +131,7 @@ class CopyEngine:
         cfg = await self.db.get_config()
         leader = await self._leader(swap.wallet)
         label = leader.label if leader else ""
-        weight = leader.weight_pct if leader else 100.0
+        mode = (leader.mode if leader and leader.mode else "") or cfg.mode
         sol_value = await self._sol_value(swap)
         await self._record_leader_stats(swap.wallet, swap.side)
 
@@ -137,15 +139,18 @@ class CopyEngine:
         header = leader_trade_text(swap, label, sol_value)
 
         # ---- decide -------------------------------------------------------
-        if cfg.mode == "notify":
-            return await self._finish_skip(trade_id, header, "notify mode - not copied", "seen")
+        if mode == "notify":
+            why = "notify mode for this leader" if leader and leader.mode == "notify" else "notify mode"
+            return await self._finish_skip(trade_id, header, f"{why} - not copied", "seen")
         if cfg.paused:
             return await self._finish_skip(trade_id, header, "bot paused (/resume to copy again)")
         if swap.side == "sell" and not cfg.copy_sells:
             return await self._finish_skip(trade_id, header, "copy_sells is off")
 
         if swap.side == "buy":
-            plan = await self.plan_buy(cfg, swap, sol_value, weight)
+            plan = await self.plan_buy(cfg, swap, sol_value, leader)
+            if plan.ai_note:
+                header += f"\n🤖 {esc(plan.ai_note)}"
             if not plan.ok:
                 return await self._finish_skip(trade_id, header, plan.reason)
             payload = {"swap": swap.to_dict(), "sol_amount": plan.sol_amount}
@@ -154,32 +159,56 @@ class CopyEngine:
             raw, _ = await self.wallet.token_balance(swap.token_mint)
             if raw <= 0:
                 return await self._finish_skip(trade_id, header, "we don't hold this token")
+            owner = await self._position_leader(swap.token_mint)
+            if owner and owner != swap.wallet:
+                other = await self._leader(owner)
+                name = (other.label if other and other.label else short(owner))
+                return await self._finish_skip(trade_id, header, f"position was opened by {name} - following their sells")
             frac = 1.0 if swap.sell_fraction >= FULL_EXIT_FRACTION else swap.sell_fraction
             if frac <= 0:
                 return await self._finish_skip(trade_id, header, "could not determine sell fraction")
             payload = {"swap": swap.to_dict(), "sell_fraction": frac}
             action = f"Copy: SELL {frac * 100:.0f}% of our position"
 
-        if cfg.mode == "confirm":
+        if mode == "confirm":
             await self._request_confirmation(trade_id, payload, f"{header}\n\n🟡 <b>{action}?</b>", cfg)
             return
 
         msg_id = await self.notify.send(f"{header}\n\n⏳ {action}…")
         await self._execute(trade_id, payload, msg_id, header)
 
-    async def plan_buy(self, cfg: BotConfig, swap: ParsedSwap, sol_value: float, weight: float) -> Decision:
+    async def plan_buy(self, cfg: BotConfig, swap: ParsedSwap, sol_value: float, leader: Leader | None) -> Decision:
         if await self.db.is_blacklisted(swap.token_mint):
             return Decision(False, 0.0, "token is blacklisted")
         if not await self.check_daily_loss(cfg):
             return Decision(False, 0.0, "daily loss limit hit - bot paused")
         my_sol = await self.wallet.sol_balance()
+        weight = leader.weight_pct if leader else 100.0
         sized = size_buy(cfg, sol_value, swap.wallet_pre_sol, my_sol, weight)
         if not sized.ok:
             return sized
         capped = apply_buy_caps(cfg, sized.sol_amount, my_sol)
         if not capped.ok:
             return Decision(False, 0.0, f"{capped.reason} ({sized.reason})")
-        return Decision(True, capped.sol_amount, "; ".join(x for x in (sized.reason, capped.reason) if x))
+        amount, notes = capped.sol_amount, [sized.reason, capped.reason]
+        if leader and leader.max_sol > 0 and amount > leader.max_sol:
+            amount = leader.max_sol
+            notes.append(f"leader max {leader.max_sol:g} SOL")
+            if amount < cfg.min_trade_sol:
+                return Decision(False, 0.0, f"leader max {leader.max_sol:g} SOL is below min trade size")
+        ai_note = ""
+        if self.ai is not None and cfg.ai_screen_buys and cfg.ai_autonomy != "off":
+            verdict = await self.ai.screen_buy(swap, leader, amount, sol_value)
+            if verdict is not None:
+                ai_note = f"AI {verdict.decision}: {verdict.reason}"
+                if verdict.decision == "reject":
+                    return Decision(False, 0.0, "rejected by AI screen", ai_note)
+                if verdict.decision == "reduce":
+                    amount *= max(0.0, min(1.0, verdict.size_multiplier))
+                    notes.append(f"AI ×{verdict.size_multiplier:.2f}")
+                    if amount < cfg.min_trade_sol:
+                        return Decision(False, 0.0, "AI-reduced size below min trade", ai_note)
+        return Decision(True, amount, "; ".join(x for x in notes if x), ai_note)
 
     # ================================================================== #
     # Execution
@@ -189,13 +218,13 @@ class CopyEngine:
         cfg = await self.db.get_config()
         if swap.side == "buy":
             res, line = await self.buy(swap.token_mint, payload["sol_amount"], cfg, swap.token_decimals,
-                                       trade_id=trade_id)
+                                       trade_id=trade_id, leader=swap.wallet)
         else:
             res, line = await self.sell(swap.token_mint, payload["sell_fraction"], cfg, trade_id=trade_id)
         await self.notify.edit(msg_id, f"{header}\n\n{line}")
 
     async def buy(self, mint: str, sol_amount: float, cfg: BotConfig, decimals_hint: int = 0,
-                  trade_id: int | None = None, origin: str = "copy") -> tuple[SwapResult, str]:
+                  trade_id: int | None = None, origin: str = "copy", leader: str = "") -> tuple[SwapResult, str]:
         async with self._mint_locks[mint]:
             res = await self.jup.execute(
                 self.rpc, self.wallet.keypair, WSOL_MINT, mint, int(sol_amount * LAMPORTS_PER_SOL),
@@ -205,7 +234,7 @@ class CopyEngine:
                 spent = res.sol_amount if res.measured else sol_amount
                 dec = res.token_decimals if res.measured else decimals_hint
                 got = res.token_amount if res.measured else res.out_amount_raw / 10**dec
-                await self._position_add(mint, got, dec, spent)
+                await self._position_add(mint, got, dec, spent, leader)
                 await self._finish_trade(trade_id, "executed", res.signature, spent, got, origin=origin)
                 self.stats["copies"] += 1
                 line = (f"✅ Bought {fmt_amount(got)} tokens for {spent:.4f} SOL "
@@ -520,7 +549,12 @@ class CopyEngine:
         await self._set_trade_status(trade_id, status, reason)
         await self.notify.send(f"{header}\n\n⏭ {esc(reason)}")
 
-    async def _position_add(self, mint: str, qty: float, decimals: int, sol_spent: float) -> None:
+    async def _position_leader(self, mint: str) -> str:
+        async with self.db.session() as s:
+            p = (await s.execute(select(Position).where(Position.token_mint == mint))).scalar_one_or_none()
+            return p.leader if p and p.qty > 0 else ""
+
+    async def _position_add(self, mint: str, qty: float, decimals: int, sol_spent: float, leader: str = "") -> None:
         async with self.db.session() as s:
             p = (await s.execute(select(Position).where(Position.token_mint == mint))).scalar_one_or_none()
             if p is None:
@@ -529,6 +563,11 @@ class CopyEngine:
             if p.qty <= 0:
                 p.opened_at = utcnow()
                 p.cost_basis_sol = 0.0
+                p.leader = leader
+            if leader:
+                ld = (await s.execute(select(Leader).where(Leader.address == leader))).scalar_one_or_none()
+                if ld:
+                    ld.copied_sol += sol_spent
             p.qty += qty
             p.decimals = decimals or p.decimals
             p.cost_basis_sol += sol_spent
@@ -548,6 +587,14 @@ class CopyEngine:
             pnl = sol_received - cost_out
             p.realized_pnl_sol += pnl
             p.cost_basis_sol -= cost_out
+            if p.leader and cost_out > 0:
+                ld = (await s.execute(select(Leader).where(Leader.address == p.leader))).scalar_one_or_none()
+                if ld:
+                    ld.realized_pnl_sol += pnl
+                    if pnl >= 0:
+                        ld.wins += 1
+                    else:
+                        ld.losses += 1
             p.qty = max(0.0, held - sold)
             if p.qty <= 1e-12 or frac >= 0.999:
                 p.qty, p.cost_basis_sol = 0.0, 0.0

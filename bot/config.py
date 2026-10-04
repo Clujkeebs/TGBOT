@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     jupiter_api_key: str = ""
     jupiter_base_url: str = ""
 
+    # --- AI manager (optional) ---
+    # Key from https://console.anthropic.com. Empty = AI features disabled.
+    anthropic_api_key: str = ""
+    ai_model: str = "claude-opus-5-5"
+
     # --- Storage ---
     database_url: str = "sqlite+aiosqlite:///./data/copybot.db"
 
@@ -115,6 +120,10 @@ class TradingDefaults(BaseModel):
     confirm_timeout_s: int = 30
     copy_sells: bool = True
     daily_summary_hour_utc: int = -1
+    ai_screen_buys: bool = True
+    ai_autonomy: Literal["off", "advise", "manage"] = "advise"
+    ai_review_hours: float = 6.0
+    ai_max_trade_sol: float = 0.0  # 0 -> same as max_trade_sol
 
 
 _SIZING_ALIASES = {"override": "percent", "multiplier": "mirror"}
@@ -139,4 +148,12 @@ def trading_defaults_from_yaml(data: dict) -> TradingDefaults:
     notify = data.get("notify") or {}
     if "daily_summary_hour_utc" in notify:
         raw["daily_summary_hour_utc"] = notify["daily_summary_hour_utc"]
-    return TradingDefaults.model_validate(raw)
+    ai = data.get("ai") or {}
+    for k_yaml, k in (("screen_buys", "ai_screen_buys"), ("autonomy", "ai_autonomy"),
+                      ("review_hours", "ai_review_hours"), ("max_trade_sol", "ai_max_trade_sol")):
+        if k_yaml in ai:
+            raw[k] = ai[k_yaml]
+    d = TradingDefaults.model_validate(raw)
+    if d.ai_max_trade_sol <= 0:
+        d.ai_max_trade_sol = d.max_trade_sol
+    return d

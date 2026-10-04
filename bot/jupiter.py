@@ -92,6 +92,19 @@ class Jupiter:
                     self._price_cache[m] = (p, now)
         return out
 
+    async def token_info(self, mint: str) -> dict:
+        """Token metadata + safety stats (liquidity, holders, audit flags, organic score)."""
+        try:
+            data = await self._request("GET", "/tokens/v2/search", params={"query": mint})
+        except JupiterError as e:
+            log.debug("token info %s: %s", mint, e)
+            return {}
+        items = data if isinstance(data, list) else (data or {}).get("tokens") or []
+        for item in items:
+            if item.get("id") == mint or item.get("address") == mint:
+                return item
+        return items[0] if items else {}
+
     async def sol_price_usd(self) -> float:
         return (await self.prices_usd([WSOL_MINT])).get(WSOL_MINT, 0.0)
 

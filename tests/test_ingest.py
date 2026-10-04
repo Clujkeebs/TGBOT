@@ -75,3 +75,21 @@ async def test_poller_wallet_without_history(tmp_path):
     await asyncio.sleep(0.05)
     assert seen == ["first"]
     await db.close()
+
+
+async def test_old_database_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE leaders (id INTEGER PRIMARY KEY, address VARCHAR(64) UNIQUE, label VARCHAR(64), "
+                "is_active BOOLEAN, weight_pct FLOAT, trades_seen INTEGER, buys INTEGER, sells INTEGER, "
+                "last_trade_at DATETIME, created_at DATETIME)")
+    con.execute("INSERT INTO leaders (address, label, is_active, weight_pct, trades_seen, buys, sells) "
+                f"VALUES ('{LEADER}', 'old', 1, 100, 0, 0, 0)")
+    con.commit()
+    con.close()
+    db = Database(f"sqlite+aiosqlite:///{path}")
+    await db.init(TradingDefaults(), [], [])
+    [ld] = await db.active_leaders()
+    assert ld.mode == "" and ld.max_sol == 0 and ld.realized_pnl_sol == 0
+    await db.close()

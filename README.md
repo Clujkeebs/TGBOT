@@ -6,10 +6,13 @@ A private Telegram bot that watches Solana "leader" wallets and copies their tra
 
 ## What it does
 
+- **Copies many wallets at once.** Follow as many leaders as you like (`/addleader` takes several at a time). Their trades are processed in parallel. Each leader can have its own mode, size weight and max SOL, and the bot tracks P/L and win rate per leader.
+- **AI manager (Claude), optional.** It checks every copy buy for rug signs, reviews your leaders every few hours, and lets you manage the bot by chatting in plain English. Details [below](#ai-manager).
+
 - **Detects leader swaps on any DEX** (Raydium, Pump.fun, Orca, Meteora, Jupiter routes, …) by comparing the wallet's SOL and token balances before and after each transaction. It doesn't depend on per-DEX decoding.
 - **Three modes:** `notify` (alerts only) → `confirm` (tap ✅/❌ for each trade) → `auto`.
 - **Sizing:** fixed SOL per trade, a % of your balance, or `mirror`: the same % of your SOL that the leader spent of theirs, with a multiplier. You can also give each leader a weight.
-- **Sells are mirrored proportionally.** If the leader sells 30% of a token, you sell 30% of yours. If they sell 98% or more, you exit completely.
+- **Sells are mirrored proportionally.** If the leader who opened the position sells 30% of a token, you sell 30% of yours. If they sell 98% or more, you exit completely. Sells by other leaders holding the same token are shown but not copied.
 - **Risk controls:** min/max trade size, a 0.02 SOL fee reserve, a max price-impact check, a token blacklist, take-profit/stop-loss, and a daily loss limit that pauses the bot automatically.
 - **Wallet:** the wallet is created on first run and its private key is encrypted at rest with Fernet. The bot also has deposit QR codes, `/withdraw`, and `/exportkey` for importing into Phantom.
 - **Two ways to detect trades:**
@@ -34,6 +37,7 @@ You need:
 2. **Your Telegram user id.** Ask [@userinfobot](https://t.me/userinfobot). Only this id can control the bot.
 3. **A Solana RPC URL.** A free [Helius](https://dashboard.helius.dev) key is fine. The public `api.mainnet-beta.solana.com` endpoint is too rate-limited for polling.
 4. **Optional:** a free [Jupiter API key](https://portal.jup.ag) for higher swap and price rate limits.
+5. **Optional:** an [Anthropic API key](https://console.anthropic.com) (`ANTHROPIC_API_KEY`) to turn on the AI manager.
 
 When the bot starts, it messages you its wallet address. Then:
 
@@ -93,8 +97,14 @@ The webhook is protected in three ways:
 | `/wallet` `/deposit` `/balance` | Address, QR code, holdings with USD values |
 | `/withdraw <amount\|all> <address>` | Send SOL out (asks you to confirm) |
 | `/exportkey` | Shows the private key in a spoiler and deletes it after 60 s |
-| `/leaders` `/addleader <addr> [label]` `/rmleader <addr\|label>` | Manage leaders |
+| `/leaders` | Every leader with P/L, win rate and overrides |
+| `/addleader <addr> [label] [<addr2> [label2] …]` `/rmleader <addr\|label>` | Follow one or many wallets, or stop following one |
 | `/weight <addr\|label> <pct>` | Per-leader size multiplier |
+| `/leadermode <addr\|label> auto\|confirm\|notify\|default` | Per-leader mode (e.g. auto for your best wallet, notify for new ones) |
+| `/leadermax <addr\|label> <SOL>` | Per-leader max SOL per buy |
+| *any plain message* | Chat with the AI manager |
+| `/ai` `/ai advise\|manage\|off` `/ai review` | AI status, autonomy level, run a review now |
+| `/ai screen on\|off` `/ai every <h>` `/ai cap <SOL>` `/ai reset` | AI buy screening, review interval, max-size ceiling, clear chat |
 | `/mode auto\|confirm\|notify` | Execution mode |
 | `/size fixed <SOL>` · `percent <%>` · `mirror <%>` | Sizing |
 | `/caps <min> <max>` `/slippage <%>` `/impact <%>` `/priority <SOL>` | Execution limits |
@@ -105,6 +115,28 @@ The webhook is protected in three ways:
 | `/buy <mint> <SOL>` `/sell <mint\|all> [pct]` | Manual trades |
 | `/trades` `/summary [hour\|off]` | Recent activity, daily summary |
 | `/pause` `/resume` | Stop or start copying (alerts continue) |
+
+## AI manager
+
+Set `ANTHROPIC_API_KEY` in `.env` (and optionally `AI_MODEL`, default `claude-opus-5-5`). The AI does three things:
+
+1. **Checks buys.** Before a copy buy executes, Claude looks at:
+   - the token: liquidity, holder concentration, whether mint/freeze authority is still enabled, organic score, age
+   - the leader's track record
+   - your current exposure
+
+   It answers **approve**, **reduce** (smaller size) or **reject**, and its reason appears in the trade alert. If the AI is slow or down, the normal rules decide and the trade isn't blocked. Turn it off with `/ai screen off`.
+2. **Reviews leaders.** Every `review_hours` (default 6), and whenever you run `/ai review`, Claude reviews each leader's results and your open positions. It can re-weight leaders, cap or pause them, and tune TP/SL, slippage and sizing.
+   - `advise` (default): the changes come to you as a proposal with an **Apply** button.
+   - `manage`: it applies them itself and reports what it did.
+3. **Chat.** Message the bot normally, for example:
+   - "which leader is losing me money?"
+   - "set TP 100% and SL 30%"
+   - "only alert me for the sniper wallet"
+
+**Hard limits, enforced in code:** the AI can never withdraw, export the key, place trades, switch the bot to auto mode, resume a pause on its own, or raise the max trade size above `ai_max_trade_sol`. Only you can change that limit, with `/ai cap`. AI requests use server-side model fallback (`fallbacks: "default"`), so if the model declines a request, it is retried on a fallback model.
+
+**Cost:** you pay per Claude call on your Anthropic account. That's one short call per copied buy while screening is on, one longer call per review, and one per chat message. To cut cost, turn screening off or lengthen `/ai every`.
 
 ## Project layout
 
@@ -120,10 +152,11 @@ bot/
   engine.py       sizing, risk, execution, positions, confirm flow, TP/SL, loss breaker
   ingest.py       RPC poller, Helius webhook receiver + webhook sync
   notifier.py     message formatting
+  ai.py           Claude AI manager: buy screen, periodic review, chat tools + guardrails
   telegram_ui.py  aiogram 3 commands (owner-only middleware)
 run.py            entrypoint (python run.py --check for a pre-flight)
 setup_env.py      interactive .env generator
-tests/            parser, sizing, engine, ingest and Telegram tests (pytest)
+tests/            parser, sizing, engine, multi-leader, AI, ingest and Telegram tests (pytest)
 ```
 
 ## Development

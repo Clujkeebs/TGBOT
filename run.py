@@ -72,6 +72,18 @@ async def check(settings) -> int:
         ok = False
     finally:
         await jup.close()
+    if settings.anthropic_api_key:
+        try:
+            import anthropic
+
+            client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+            m = await client.models.retrieve(settings.ai_model)
+            print(f"✔ Anthropic API ({m.id})")
+        except Exception as e:  # noqa: BLE001
+            print(f"✘ Anthropic API: {e}")
+            ok = False
+    else:
+        print("• AI manager disabled (no ANTHROPIC_API_KEY)")
     try:
         KeyVault(settings.fernet_key)
         print("✔ FERNET_KEY valid")
@@ -135,8 +147,20 @@ async def main() -> None:
         tasks.append(asyncio.create_task(poller.run(stop), name="poller"))
         ingest_desc = f"RPC polling every {settings.poll_interval_s:g}s"
 
+    ai = None
+    if settings.anthropic_api_key:
+        import anthropic
+
+        from bot.ai import AIManager
+
+        ai = AIManager(anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key), settings.ai_model, engine)
+        ai.on_leaders_changed = on_leaders_changed
+        engine.ai = ai
+        tasks.append(asyncio.create_task(ai.review_loop(stop), name="ai-review"))
+        log.info("AI manager enabled (%s)", settings.ai_model)
+
     ui = TelegramUI(bot, engine, wallet, settings.owner_ids, on_leaders_changed,
-                    settings.hot_wallet_max_sol, ingest_desc)
+                    settings.hot_wallet_max_sol, ingest_desc, ai=ai)
     await ui.set_menu()
     tasks.append(asyncio.create_task(engine.tp_sl_loop(stop), name="tpsl"))
     tasks.append(asyncio.create_task(engine.daily_summary_loop(stop), name="summary"))
@@ -150,7 +174,8 @@ async def main() -> None:
         bal = f"unknown ({e})"
     hello = (f"🤖 <b>Copy bot started</b>\nWallet: <code>{pubkey}</code>{' (NEW - fund it!)' if created else ''}\n"
              f"Balance: {bal}\nMode: <b>{cfg.mode}</b>{' (paused)' if cfg.paused else ''} · "
-             f"{len(leaders)} leader(s) · {ingest_desc}\n/help for commands")
+             f"{len(leaders)} leader(s) · {ingest_desc}\n"
+             f"AI manager: {cfg.ai_autonomy if ai else 'off (set ANTHROPIC_API_KEY)'}\n/help for commands")
     await notifier.send(hello)
     log.info("Started. wallet=%s mode=%s leaders=%d ingest=%s", pubkey, cfg.mode, len(leaders), ingest_desc)
 

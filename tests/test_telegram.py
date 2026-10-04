@@ -157,3 +157,37 @@ async def test_sell_and_positions(ui):
 
 async def test_unknown_text(ui):
     assert "Unknown command" in (await feed(ui, msg("hello")))[0]
+
+
+async def test_addleader_multiple_and_leader_overrides(ui):
+    from solders.keypair import Keypair
+    _, _, db, _ = ui
+    a, b = str(Keypair().pubkey()), str(Keypair().pubkey())
+    out = await feed(ui, msg(f"/addleader {a} Whale A {b} Sniper"))
+    assert "Following 2 wallet(s)" in out[0]
+    labels = sorted(l.label for l in await db.active_leaders())
+    assert labels == ["Sniper", "Whale A"]
+    await feed(ui, msg("/leadermode Sniper notify"))
+    await feed(ui, msg("/leadermax Whale A 0.2"))
+    out = (await feed(ui, msg("/leaders")))[0]
+    assert "mode notify" in out and "max 0.2 SOL" in out
+
+
+async def test_ai_disabled_and_chat_routing(ui):
+    ui_, *_ = ui
+    assert "ANTHROPIC_API_KEY" in (await feed(ui, msg("/ai")))[0]
+    assert "ANTHROPIC_API_KEY" in (await feed(ui, msg("how are my leaders?")))[0]
+
+    class FakeAI:
+        model = "claude-opus-5-5"
+        stats = {"screens": 0, "rejects": 0, "reduces": 0, "reviews": 0, "errors": 0}
+
+        async def chat(self, text):
+            return f"echo <{text}>"
+
+    ui_.ai = FakeAI()
+    out = await feed(ui, msg("how are my leaders?"))
+    assert out[-1] == "🤖 echo &lt;how are my leaders?&gt;"
+    await feed(ui, msg("/ai manage"))
+    assert (await ui[2].get_config()).ai_autonomy == "manage"
+    assert "manage" in (await feed(ui, msg("/ai")))[0]

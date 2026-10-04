@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import AsyncIterator
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -15,6 +15,25 @@ from bot.config import TradingDefaults
 from bot.models import Base, Blacklist, BotConfig, Leader, ProcessedSignature, utcnow
 
 log = logging.getLogger("copybot.db")
+
+
+def _add_missing_columns(conn) -> None:
+    """Tiny forward-only migration: add columns introduced after a DB was created."""
+    insp = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        if not insp.has_table(table.name):
+            continue
+        existing = {c["name"] for c in insp.get_columns(table.name)}
+        for col in table.columns:
+            if col.name in existing:
+                continue
+            default = col.default.arg if col.default is not None and not callable(col.default.arg) else None
+            ddl = f'ALTER TABLE {table.name} ADD COLUMN {col.name} {col.type.compile(conn.dialect)}'
+            if default is not None:
+                lit = f"'{default}'" if isinstance(default, str) else str(int(default) if isinstance(default, bool) else default)
+                ddl += f" DEFAULT {lit}"
+            conn.execute(text(ddl))
+            log.info("Migrated: added %s.%s", table.name, col.name)
 
 
 class Database:
@@ -39,6 +58,7 @@ class Database:
     async def init(self, defaults: TradingDefaults, leaders: list[dict], blacklist: list[dict]) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(_add_missing_columns)
 
         async with self.session() as s:
             if (await s.execute(select(BotConfig))).scalars().first() is None:

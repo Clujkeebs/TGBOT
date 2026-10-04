@@ -12,3 +12,4 @@ pydantic-settings==2.15.0
 PyYAML==6.0.3
 qrcode[pil]==8.2
 base58==2.1.1
+anthropic==1.11.0

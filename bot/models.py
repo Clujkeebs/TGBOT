@@ -33,6 +33,15 @@ class Leader(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Per-leader size multiplier in percent (100 = normal size).
     weight_pct: Mapped[float] = mapped_column(Float, default=100.0)
+    # Per-leader overrides: "" = use the global setting.
+    mode: Mapped[str] = mapped_column(String(16), default="")  # "" | auto | confirm | notify
+    max_sol: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = global max_trade_sol
+    # Performance of positions this leader opened for us.
+    realized_pnl_sol: Mapped[float] = mapped_column(Float, default=0.0)
+    wins: Mapped[int] = mapped_column(Integer, default=0)
+    losses: Mapped[int] = mapped_column(Integer, default=0)
+    copied_sol: Mapped[float] = mapped_column(Float, default=0.0)
+    ai_note: Mapped[str] = mapped_column(Text, default="")
     trades_seen: Mapped[int] = mapped_column(Integer, default=0)
     buys: Mapped[int] = mapped_column(Integer, default=0)
     sells: Mapped[int] = mapped_column(Integer, default=0)
@@ -68,6 +77,7 @@ class Position(Base):
     __tablename__ = "positions"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     token_mint: Mapped[str] = mapped_column(String(64), unique=True)
+    leader: Mapped[str] = mapped_column(String(64), default="")  # leader whose buy opened it
     qty: Mapped[float] = mapped_column(Float, default=0.0)  # ui amount
     decimals: Mapped[int] = mapped_column(Integer, default=0)
     cost_basis_sol: Mapped[float] = mapped_column(Float, default=0.0)  # SOL in the open qty
@@ -95,6 +105,11 @@ class BotConfig(Base):
     confirm_timeout_s: Mapped[int] = mapped_column(Integer, default=30)
     copy_sells: Mapped[bool] = mapped_column(Boolean, default=True)
     daily_summary_hour_utc: Mapped[int] = mapped_column(Integer, default=-1)
+    # AI manager
+    ai_screen_buys: Mapped[bool] = mapped_column(Boolean, default=True)
+    ai_autonomy: Mapped[str] = mapped_column(String(16), default="advise")  # off | advise | manage
+    ai_review_hours: Mapped[float] = mapped_column(Float, default=6.0)
+    ai_max_trade_sol: Mapped[float] = mapped_column(Float, default=0.5)  # AI can never set max above this
     paused: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
