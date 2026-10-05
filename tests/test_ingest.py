@@ -93,3 +93,41 @@ async def test_old_database_is_migrated(tmp_path):
     [ld] = await db.active_leaders()
     assert ld.mode == "" and ld.max_sol == 0 and ld.realized_pnl_sol == 0
     await db.close()
+
+
+async def test_poller_pages_through_bursts(tmp_path):
+    db = await _db(tmp_path)
+    rpc = FakeRpc()
+    rpc.signatures[LEADER] = [{"signature": "old", "err": None}]
+    seen = []
+
+    async def handler(leader, sig):
+        seen.append(sig)
+
+    p = LeaderPoller(db, rpc, handler, 0.5)
+    await p._poll_one(LEADER)
+    burst = [{"signature": f"s{i}", "err": None} for i in range(60, 0, -1)]  # newest first
+    rpc.signatures[LEADER] = burst + [{"signature": "old", "err": None}]
+    await p._poll_one(LEADER)
+    await asyncio.sleep(0.05)
+    assert seen == [f"s{i}" for i in range(1, 61)]
+    await db.close()
+
+
+async def test_poller_health_alert(tmp_path):
+    db = await _db(tmp_path)
+    alerts = []
+
+    async def alert(text):
+        alerts.append(text)
+
+    p = LeaderPoller(db, FakeRpc(), None, 0.5, alert=alert)
+    await p._health(True, 0)
+    await p._health(True, 60)
+    assert alerts == []
+    await p._health(True, 130)
+    await p._health(True, 200)
+    assert len(alerts) == 1 and "RPC unreachable" in alerts[0]
+    await p._health(False, 210)
+    assert len(alerts) == 2 and "back" in alerts[1]
+    await db.close()

@@ -1,16 +1,12 @@
 import asyncio
 
 import pytest
-from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from bot.config import TradingDefaults, WSOL_MINT
-from bot.crypto import KeyVault
-from bot.db import Database
-from bot.engine import CopyEngine, apply_buy_caps, size_buy
+from bot.engine import apply_buy_caps, size_buy
 from bot.models import BotConfig, Position, Trade
-from bot.wallet import WalletManager
-from tests.helpers import LEADER, TOKEN, FakeJupiter, FakeNotifier, FakeRpc, buy_tx, sell_tx
+from tests.helpers import LEADER, TOKEN, buy_tx, sell_tx
 
 
 def cfg(**kw) -> BotConfig:
@@ -54,22 +50,6 @@ def test_caps():
 
 
 # ---------------------------------------------------------------- engine
-@pytest.fixture
-async def env(tmp_path):
-    db = Database(f"sqlite+aiosqlite:///{tmp_path}/t.db")
-    await db.init(TradingDefaults(mode="auto", sizing_mode="fixed", sizing_value=0.1, daily_loss_limit_pct=0),
-                  [{"address": LEADER, "label": "whale"}], [])
-    rpc = FakeRpc()
-    wallet = WalletManager(db, rpc, KeyVault(Fernet.generate_key().decode()))
-    await wallet.ensure_wallet()
-    jup = FakeJupiter(rpc)
-    notifier = FakeNotifier()
-    engine = CopyEngine(db, rpc, wallet, jup, notifier)
-    yield db, rpc, jup, notifier, engine
-    await engine.shutdown()
-    await db.close()
-
-
 async def trades(db):
     async with db.session() as s:
         return list((await s.execute(select(Trade).order_by(Trade.id))).scalars().all())

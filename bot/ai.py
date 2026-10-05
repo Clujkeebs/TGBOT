@@ -212,16 +212,17 @@ class AIManager:
     # 1. Buy screen
     # ------------------------------------------------------------------ #
     async def screen_buy(self, swap: ParsedSwap, leader: Leader | None, sol_amount: float,
-                         leader_sol_value: float) -> Verdict | None:
+                         leader_sol_value: float, token_info: dict | None = None) -> Verdict | None:
         try:
-            return await asyncio.wait_for(self._screen(swap, leader, sol_amount, leader_sol_value), SCREEN_TIMEOUT_S)
+            return await asyncio.wait_for(self._screen(swap, leader, sol_amount, leader_sol_value, token_info),
+                                          SCREEN_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001
             self.stats["errors"] += 1
             log.warning("AI screen failed (%s) - falling back to rules", e)
             return None
 
-    async def _screen(self, swap, leader, sol_amount, leader_sol_value) -> Verdict | None:
-        info = await self.engine.jup.token_info(swap.token_mint)
+    async def _screen(self, swap, leader, sol_amount, leader_sol_value, token_info=None) -> Verdict | None:
+        info = token_info if token_info is not None else await self.engine.jup.token_info(swap.token_mint)
         exposure = await self._exposure()
         ctx = {
             "token_mint": swap.token_mint,

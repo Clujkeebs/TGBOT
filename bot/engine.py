@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from bot.config import LAMPORTS_PER_SOL, WSOL_MINT
 from bot.db import Database
+from bot.filters import check_token
 from bot.jupiter import Jupiter, SwapResult
 from bot.models import BotConfig, DailyBaseline, Leader, PendingConfirmation, Position, Trade, utcnow
 from bot.notifier import Notifier, confirm_keyboard, esc, fmt_amount, leader_trade_text, short, tx_link
@@ -196,9 +197,30 @@ class CopyEngine:
             notes.append(f"leader max {leader.max_sol:g} SOL")
             if amount < cfg.min_trade_sol:
                 return Decision(False, 0.0, f"leader max {leader.max_sol:g} SOL is below min trade size")
+        # ---- exposure limits ---------------------------------------------
+        held_cost, open_count = await self._exposure(swap.token_mint)
+        if held_cost is None and cfg.max_open_positions and open_count >= cfg.max_open_positions:
+            return Decision(False, 0.0, f"max open positions reached ({open_count})")
+        if cfg.max_token_exposure_sol > 0:
+            room = cfg.max_token_exposure_sol - (held_cost or 0.0)
+            if room < cfg.min_trade_sol:
+                return Decision(False, 0.0, f"already {held_cost:.3f} SOL in this token (max {cfg.max_token_exposure_sol:g})")
+            if amount > room:
+                amount = room
+                notes.append(f"token exposure cap {cfg.max_token_exposure_sol:g} SOL")
+
+        # ---- token safety filters ------------------------------------------
+        mint_info, token_info = await asyncio.gather(self._safe(self.rpc.get_mint_info(swap.token_mint), {}),
+                                                     self._safe(self.jup.token_info(swap.token_mint), {}))
+        ok, why = check_token(cfg, mint_info, token_info)
+        if not ok:
+            return Decision(False, 0.0, f"filter: {why}")
+        if why:
+            notes.append(why)
+
         ai_note = ""
         if self.ai is not None and cfg.ai_screen_buys and cfg.ai_autonomy != "off":
-            verdict = await self.ai.screen_buy(swap, leader, amount, sol_value)
+            verdict = await self.ai.screen_buy(swap, leader, amount, sol_value, token_info)
             if verdict is not None:
                 ai_note = f"AI {verdict.decision}: {verdict.reason}"
                 if verdict.decision == "reject":
@@ -227,7 +249,7 @@ class CopyEngine:
                   trade_id: int | None = None, origin: str = "copy", leader: str = "") -> tuple[SwapResult, str]:
         async with self._mint_locks[mint]:
             res = await self.jup.execute(
-                self.rpc, self.wallet.keypair, WSOL_MINT, mint, int(sol_amount * LAMPORTS_PER_SOL),
+                self.rpc, self.wallet.keypair, WSOL_MINT, mint, int(round(sol_amount * LAMPORTS_PER_SOL)),
                 cfg.slippage_bps, cfg.priority_fee_max_lamports, cfg.max_price_impact_pct,
             )
             if res.ok:
@@ -548,6 +570,35 @@ class CopyEngine:
     async def _finish_skip(self, trade_id: int, header: str, reason: str, status: str = "skipped") -> None:
         await self._set_trade_status(trade_id, status, reason)
         await self.notify.send(f"{header}\n\n⏭ {esc(reason)}")
+
+    @staticmethod
+    async def _safe(coro, default):
+        try:
+            return await coro
+        except Exception as e:  # noqa: BLE001
+            log.debug("lookup failed: %s", e)
+            return default
+
+    async def _exposure(self, mint: str) -> tuple[float | None, int]:
+        """(SOL cost already in `mint` or None if not held, number of open positions)."""
+        async with self.db.session() as s:
+            rows = list((await s.execute(select(Position).where(Position.qty > 0))).scalars().all())
+        held = next((p.cost_basis_sol for p in rows if p.token_mint == mint), None)
+        return held, len(rows)
+
+    async def expire_stale_confirmations(self) -> int:
+        """After a restart, pending confirm prompts can't be honoured any more - close them out."""
+        async with self.db.session() as s:
+            rows = list((await s.execute(select(PendingConfirmation).where(
+                PendingConfirmation.resolved.is_(False)))).scalars().all())
+            for pc in rows:
+                pc.resolved = True
+                t = await s.get(Trade, pc.trade_id)
+                if t:
+                    t.status, t.note = "timeout", "bot restarted before confirmation"
+        for pc in rows:
+            await self.notify.edit(pc.message_id, "⌛ Expired - the bot restarted before this was confirmed.")
+        return len(rows)
 
     async def _position_leader(self, mint: str) -> str:
         async with self.db.session() as s:

@@ -55,7 +55,7 @@ async def env(tmp_path):
     jup = FakeJupiter(rpc)
 
     async def token_info(mint):
-        return {"id": mint, "symbol": "MEME", "liquidity": 1234.0, "audit": {"mintAuthorityDisabled": False}}
+        return {"id": mint, "symbol": "MEME", "liquidity": 123456.0, "audit": {"mintAuthorityDisabled": False}}
 
     jup.token_info = token_info
     notifier = FakeNotifier()
@@ -93,7 +93,7 @@ async def test_screen_reject_blocks_buy(env):
     assert call["betas"] == [FALLBACK_BETA] and call["fallbacks"] == "default"
     assert call["output_config"]["format"]["type"] == "json_schema"
     ctx = json.loads(call["messages"][0]["content"])
-    assert ctx["token"]["symbol"] == "MEME" and ctx["leader"]["label"] == "whale"
+    assert ctx["token"]["symbol"] == "MEME" and ctx["token"]["liquidity"] == 123456.0 and ctx["leader"]["label"] == "whale"
 
 
 async def test_screen_reduce_scales_size(env):

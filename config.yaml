@@ -36,3 +36,14 @@ ai:
   autonomy: advise      # off | advise (proposes changes, you tap Apply) | manage (applies changes itself)
   review_hours: 6       # how often the AI reviews leaders and positions (0 = only on /ai review)
   max_trade_sol: 0      # hard ceiling the AI can never raise max_trade_sol above (0 = max_trade_sol)
+
+# Rug filters - checked before every copy buy (mint/freeze are read on-chain)
+filters:
+  min_liquidity_usd: 5000
+  require_mint_disabled: true     # skip tokens whose dev can still mint more
+  require_freeze_disabled: true   # skip tokens whose dev can freeze your balance
+  max_top_holders_pct: 0          # e.g. 50 = skip if top holders own >50% (0 = off)
+  min_token_age_min: 0            # e.g. 5 = skip tokens younger than 5 minutes (0 = off)
+
+max_open_positions: 10            # 0 = unlimited
+max_token_exposure_sol: 0         # max SOL in any single token (0 = unlimited)

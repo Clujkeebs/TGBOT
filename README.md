@@ -10,6 +10,10 @@ A private Telegram bot that watches Solana "leader" wallets and copies their tra
 - **AI manager (Claude), optional.** It checks every copy buy for rug signs, reviews your leaders every few hours, and lets you manage the bot by chatting in plain English. Details [below](#ai-manager).
 
 - **Detects leader swaps on any DEX** (Raydium, Pump.fun, Orca, Meteora, Jupiter routes, …) by comparing the wallet's SOL and token balances before and after each transaction. It doesn't depend on per-DEX decoding.
+- **Paper trading.** With `PAPER_TRADING=true` the bot follows real leaders and uses real Jupiter quotes, but trades with fake SOL. Paper results go to a separate database (`data/paper.db`). Start here.
+- **Rug filters.** Before any buy, the bot checks on-chain whether the token's creator can still mint more tokens or freeze yours. From Jupiter it checks minimum liquidity, and optionally how much the top holders own and how old the token is. Set these with `/filters`.
+- **Exposure limits.** Caps on how many positions you hold at once and how much SOL goes into one token (`/limits`).
+- **RPC watchdog.** You get a Telegram alert if the RPC stops answering for 2 minutes, and another when it recovers. Busy leaders are caught up on too (up to 100 transactions per check).
 - **Three modes:** `notify` (alerts only) → `confirm` (tap ✅/❌ for each trade) → `auto`.
 - **Sizing:** fixed SOL per trade, a % of your balance, or `mirror`: the same % of your SOL that the leader spent of theirs, with a multiplier. You can also give each leader a weight.
 - **Sells are mirrored proportionally.** If the leader who opened the position sells 30% of a token, you sell 30% of yours. If they sell 98% or more, you exit completely. Sells by other leaders holding the same token are shown but not copied.
@@ -39,7 +43,7 @@ You need:
 4. **Optional:** a free [Jupiter API key](https://portal.jup.ag) for higher swap and price rate limits.
 5. **Optional:** an [Anthropic API key](https://console.anthropic.com) (`ANTHROPIC_API_KEY`) to turn on the AI manager.
 
-When the bot starts, it messages you its wallet address. Then:
+`setup_env.py` offers to start in **paper mode**, and that's the recommended first step. When the bot starts, it messages you. Then:
 
 ```
 /deposit                      send a small amount of SOL (e.g. 0.1)
@@ -111,6 +115,9 @@ The webhook is protected in three ways:
 | `/tpsl <tp%> <sl%>` `/loss <%>` | Take-profit/stop-loss, daily loss limit |
 | `/copysells on\|off` `/timeout <s>` | Sell mirroring, how long confirm mode waits |
 | `/blacklist [add\|rm <mint> [reason]]` | Never buy these tokens |
+| `/filters [liquidity <USD>\|mint on\|off\|freeze on\|off\|holders <%>\|age <min>]` | Rug filters |
+| `/limits <max positions> <max SOL per token>` | Exposure limits (0 = unlimited) |
+| `/paper` `/paper reset <SOL>` | Paper balance, start over (paper mode only) |
 | `/positions` | Open positions with live value, unrealized and realized P/L |
 | `/buy <mint> <SOL>` `/sell <mint\|all> [pct]` | Manual trades |
 | `/trades` `/summary [hour\|off]` | Recent activity, daily summary |
@@ -152,6 +159,8 @@ bot/
   engine.py       sizing, risk, execution, positions, confirm flow, TP/SL, loss breaker
   ingest.py       RPC poller, Helius webhook receiver + webhook sync
   notifier.py     message formatting
+  filters.py      rug filters (on-chain authorities + Jupiter liquidity/holders/age)
+  paper.py        paper trading wallet + simulated Jupiter fills
   ai.py           Claude AI manager: buy screen, periodic review, chat tools + guardrails
   telegram_ui.py  aiogram 3 commands (owner-only middleware)
 run.py            entrypoint (python run.py --check for a pre-flight)

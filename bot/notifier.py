@@ -14,6 +14,8 @@ log = logging.getLogger("copybot.notifier")
 
 
 def tx_link(sig: str, text: str = "tx") -> str:
+    if sig.startswith("PAPER"):
+        return f"<i>{text}: paper</i>"
     return f'<a href="https://solscan.io/tx/{sig}">{text}</a>'
 
 

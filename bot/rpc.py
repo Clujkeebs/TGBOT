@@ -63,10 +63,13 @@ class SolanaRpc:
         res = await self.call("getBalance", [pubkey, {"commitment": "confirmed"}])
         return int(res["value"])
 
-    async def get_signatures_for_address(self, address: str, limit: int = 20, until: str | None = None) -> list[dict]:
+    async def get_signatures_for_address(self, address: str, limit: int = 20, until: str | None = None,
+                                         before: str | None = None) -> list[dict]:
         opts: dict = {"limit": limit, "commitment": "confirmed"}
         if until:
             opts["until"] = until
+        if before:
+            opts["before"] = before
         return await self.call("getSignaturesForAddress", [address, opts]) or []
 
     async def get_transaction(self, signature: str) -> dict | None:
@@ -94,6 +97,14 @@ class SolanaRpc:
             raw += int(ta["amount"])
             decimals = int(ta["decimals"])
         return raw, decimals
+
+    async def get_mint_info(self, mint: str) -> dict:
+        """Parsed SPL mint: mintAuthority, freezeAuthority, decimals, supply ({} if not a mint)."""
+        res = await self.call("getAccountInfo", [mint, {"encoding": "jsonParsed", "commitment": "confirmed"}])
+        try:
+            return res["value"]["data"]["parsed"]["info"]
+        except (TypeError, KeyError):
+            return {}
 
     async def get_latest_blockhash(self) -> str:
         res = await self.call("getLatestBlockhash", [{"commitment": "confirmed"}])

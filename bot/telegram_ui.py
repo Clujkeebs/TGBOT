@@ -57,7 +57,10 @@ Just type a message to talk to the AI, e.g. "how are my leaders doing?"
 /copysells on|off
 /timeout &lt;seconds&gt; – confirm-mode timeout
 /blacklist [add|rm &lt;mint&gt; [reason]]
+/filters – rug filters (liquidity, authorities, holders, age)
+/limits &lt;max positions&gt; &lt;max SOL per token&gt; – exposure limits
 /pause · /resume
+/paper reset &lt;SOL&gt; – reset the fake balance (paper mode only)
 
 <b>Positions</b>
 /positions – open positions with live P/L
@@ -139,7 +142,7 @@ class TelegramUI:
             "pause": self.cmd_pause, "resume": self.cmd_resume, "positions": self.cmd_positions,
             "pnl": self.cmd_positions, "buy": self.cmd_buy, "sell": self.cmd_sell, "trades": self.cmd_trades,
             "summary": self.cmd_summary, "leadermode": self.cmd_leadermode, "leadermax": self.cmd_leadermax,
-            "ai": self.cmd_ai,
+            "ai": self.cmd_ai, "filters": self.cmd_filters, "limits": self.cmd_limits, "paper": self.cmd_paper,
         }
         for name, fn in cmds.items():
             r.message.register(self._guard(fn), Command(name))
@@ -272,13 +275,16 @@ class TelegramUI:
         st = self.engine.stats
         size = {"fixed": f"fixed {cfg.sizing_value:g} SOL", "percent": f"{cfg.sizing_value:g}% of balance",
                 "mirror": f"mirror ×{cfg.sizing_value:g}%"}.get(cfg.sizing_mode, cfg.sizing_mode)
+        paper = "📝 PAPER · " if self.wallet.pubkey == "PAPER-WALLET" else ""
         await m.answer(
-            f"<b>Status</b> {'⏸ PAUSED' if cfg.paused else '▶️ running'}\n"
+            f"<b>Status</b> {paper}{'⏸ PAUSED' if cfg.paused else '▶️ running'}\n"
             f"Mode: <b>{cfg.mode}</b> · Sizing: {size}\n"
             f"Caps: {cfg.min_trade_sol:g}–{cfg.max_trade_sol:g} SOL · Slippage {cfg.slippage_bps / 100:g}%\n"
             f"Max impact {cfg.max_price_impact_pct:g}% · Priority ≤{cfg.priority_fee_max_lamports / 1e9:g} SOL\n"
             f"TP {cfg.tp_pct:g}% / SL {cfg.sl_pct:g}% · Daily loss limit {cfg.daily_loss_limit_pct:g}%\n"
             f"Copy sells: {_yes_no(cfg.copy_sells)} · Confirm timeout {cfg.confirm_timeout_s}s\n"
+            f"Limits: {cfg.max_open_positions or '∞'} positions · "
+            f"{f'{cfg.max_token_exposure_sol:g} SOL' if cfg.max_token_exposure_sol else '∞'} per token\n"
             f"Leaders: {len(leaders)} active (all copied in parallel) · Ingest: {self.ingest_desc}\n"
             f"AI: {(cfg.ai_autonomy + (', screening buys' if cfg.ai_screen_buys else '')) if self.ai else 'disabled'}\n"
             f"Wallet: <code>{self.wallet.pubkey}</code> ({sol:.4f} SOL)\n"
@@ -639,6 +645,60 @@ class TelegramUI:
             lines.append(f"{icons.get(t.status, '•')} {t.created_at:%m-%d %H:%M} {t.origin} {t.side.upper()} "
                          f"<code>{short(t.token_mint)}</code>{our}{link}{note}")
         await m.answer("\n".join(lines), disable_web_page_preview=True)
+
+    async def cmd_filters(self, m: Message, args: list[str]) -> None:
+        keys = {"liquidity": ("min_liquidity_usd", float), "mint": ("require_mint_disabled", bool),
+                "freeze": ("require_freeze_disabled", bool), "holders": ("max_top_holders_pct", float),
+                "age": ("min_token_age_min", float)}
+        if len(args) == 2 and args[0].lower() in keys:
+            field, typ = keys[args[0].lower()]
+            if typ is bool:
+                if args[1].lower() not in ("on", "off"):
+                    raise ValueError("Use on|off")
+                val = args[1].lower() == "on"
+            else:
+                val = _parse_float(args[1])
+                if val < 0:
+                    raise ValueError("Must be ≥ 0")
+            await self.db.update_config(**{field: val})
+        elif args:
+            raise ValueError("Usage: /filters liquidity <USD> | mint on|off | freeze on|off | holders <%> | age <min>")
+        c = await self.db.get_config()
+        await m.answer(
+            "<b>Token filters</b> (checked before every copy buy)\n"
+            f"Min liquidity: ${c.min_liquidity_usd:,.0f}" + (" (off)" if not c.min_liquidity_usd else "") + "\n"
+            f"Block if mint authority enabled: {_yes_no(c.require_mint_disabled)}\n"
+            f"Block if freeze authority enabled: {_yes_no(c.require_freeze_disabled)}\n"
+            f"Max top-holder share: {f'{c.max_top_holders_pct:g}%' if c.max_top_holders_pct else 'off'}\n"
+            f"Min token age: {f'{c.min_token_age_min:g} min' if c.min_token_age_min else 'off'}\n\n"
+            "Change: /filters liquidity 10000 · mint on · freeze on · holders 50 · age 5")
+
+    async def cmd_limits(self, m: Message, args: list[str]) -> None:
+        if len(args) != 2:
+            c = await self.db.get_config()
+            raise ValueError(f"Now: {c.max_open_positions or 'unlimited'} positions, "
+                             f"{c.max_token_exposure_sol or 'unlimited'} SOL per token. "
+                             "Usage: /limits <max open positions> <max SOL per token> (0 = unlimited)")
+        n, x = int(_parse_float(args[0])), _parse_float(args[1])
+        if n < 0 or x < 0:
+            raise ValueError("Must be ≥ 0")
+        await self.db.update_config(max_open_positions=n, max_token_exposure_sol=x)
+        await m.answer(f"✅ Max {n or '∞'} open positions · {f'{x:g} SOL' if x else '∞'} per token")
+
+    async def cmd_paper(self, m: Message, args: list[str]) -> None:
+        if not hasattr(self.wallet, "reset"):
+            raise ValueError("Not in paper mode. Set PAPER_TRADING=true in .env and restart to practise with fake SOL.")
+        if len(args) == 2 and args[0] == "reset":
+            sol = _parse_float(args[1])
+            if sol <= 0:
+                raise ValueError("Must be > 0")
+            await self.wallet.reset(sol)
+            async with self.db.session() as s:
+                for p in (await s.execute(select(Position))).scalars().all():
+                    await s.delete(p)
+            await m.answer(f"📝 Paper wallet reset to {sol:g} SOL, positions cleared.")
+            return
+        await m.answer(f"📝 Paper balance: {await self.wallet.sol_balance():.4f} SOL. /paper reset &lt;SOL&gt; to start over.")
 
     async def cmd_ai(self, m: Message, args: list[str]) -> None:
         if self.ai is None:

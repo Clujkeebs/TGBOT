@@ -105,6 +105,15 @@ class BotConfig(Base):
     confirm_timeout_s: Mapped[int] = mapped_column(Integer, default=30)
     copy_sells: Mapped[bool] = mapped_column(Boolean, default=True)
     daily_summary_hour_utc: Mapped[int] = mapped_column(Integer, default=-1)
+    # Token safety filters (rule-based, run before the AI screen)
+    min_liquidity_usd: Mapped[float] = mapped_column(Float, default=5000.0)
+    require_mint_disabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    require_freeze_disabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_top_holders_pct: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = off
+    min_token_age_min: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = off
+    # Exposure limits
+    max_open_positions: Mapped[int] = mapped_column(Integer, default=10)  # 0 = unlimited
+    max_token_exposure_sol: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = unlimited
     # AI manager
     ai_screen_buys: Mapped[bool] = mapped_column(Boolean, default=True)
     ai_autonomy: Mapped[str] = mapped_column(String(16), default="advise")  # off | advise | manage
@@ -139,6 +148,15 @@ class PendingConfirmation(Base):
     message_id: Mapped[int] = mapped_column(Integer, default=0)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class PaperBalance(Base):
+    """Simulated balances for PAPER_TRADING=true (WSOL mint = SOL in lamports)."""
+
+    __tablename__ = "paper_balances"
+    mint: Mapped[str] = mapped_column(String(64), primary_key=True)
+    raw: Mapped[int] = mapped_column(Integer, default=0)
+    decimals: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class DailyBaseline(Base):

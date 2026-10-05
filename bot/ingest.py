@@ -36,22 +36,32 @@ def _spawn(coro) -> None:
 
 
 class LeaderPoller:
-    def __init__(self, db: Database, rpc: SolanaRpc, handler: Handler, interval_s: float = 2.0):
+    PAGE = 25
+    MAX_PAGES = 4  # catch up on up to 100 txs per leader per cycle
+    ALERT_AFTER_S = 120
+
+    def __init__(self, db: Database, rpc: SolanaRpc, handler: Handler, interval_s: float = 2.0,
+                 alert: Callable[[str], Awaitable[None]] | None = None):
         self.db = db
         self.rpc = rpc
         self.handler = handler
         self.interval_s = max(0.5, interval_s)
+        self.alert = alert
         self._cursor: dict[str, str] = {}  # leader -> newest signature already seen
+        self._failing_since: float | None = None
+        self._alerted = False
 
     async def run(self, stop: asyncio.Event) -> None:
         log.info("Polling leaders every %.1fs", self.interval_s)
+        loop = asyncio.get_running_loop()
         while not stop.is_set():
             try:
                 leaders = [ld.address for ld in await self.db.active_leaders()]
                 for addr in list(self._cursor):
                     if addr not in leaders:
                         self._cursor.pop(addr)
-                await asyncio.gather(*(self._poll_one(a) for a in leaders))
+                results = await asyncio.gather(*(self._poll_one(a) for a in leaders))
+                await self._health(bool(leaders) and not any(results), loop.time())
             except Exception:  # noqa: BLE001
                 log.exception("poll cycle failed")
             try:
@@ -59,25 +69,49 @@ class LeaderPoller:
             except asyncio.TimeoutError:
                 pass
 
-    async def _poll_one(self, leader: str) -> None:
+    async def _health(self, all_failed: bool, now: float) -> None:
+        if all_failed:
+            if self._failing_since is None:
+                self._failing_since = now
+            elif not self._alerted and now - self._failing_since >= self.ALERT_AFTER_S:
+                self._alerted = True
+                if self.alert:
+                    await self.alert("🚨 <b>RPC unreachable</b> for 2+ minutes - leader trades are NOT being "
+                                     "detected. Check SOLANA_RPC_URL / your RPC provider.")
+        else:
+            if self._alerted and self.alert:
+                await self.alert("✅ RPC is back - watching leaders again.")
+            self._failing_since, self._alerted = None, False
+
+    async def _poll_one(self, leader: str) -> bool:
         first_sight = leader not in self._cursor
+        until = self._cursor.get(leader) or None
         try:
-            until = self._cursor.get(leader) or None
-            sigs = await self.rpc.get_signatures_for_address(leader, limit=1 if first_sight else 25, until=until)
+            sigs = await self.rpc.get_signatures_for_address(leader, limit=1 if first_sight else self.PAGE,
+                                                             until=until)
+            if first_sight:
+                # Start from "now" - don't replay history. "" marks a wallet with no history yet.
+                self._cursor[leader] = sigs[0]["signature"] if sigs else ""
+                return True
+            pages = 1
+            while len(sigs) == self.PAGE * pages and pages < self.MAX_PAGES:
+                more = await self.rpc.get_signatures_for_address(leader, limit=self.PAGE, until=until,
+                                                                 before=sigs[-1]["signature"])
+                if not more:
+                    break
+                sigs += more
+                pages += 1
         except Exception as e:  # noqa: BLE001
             log.warning("poll %s failed: %s", leader[:6], e)
-            return
-        if first_sight:
-            # Start from "now" - don't replay history. "" marks a wallet with no history yet.
-            self._cursor[leader] = sigs[0]["signature"] if sigs else ""
-            return
+            return False
         if not sigs:
-            return
+            return True
         self._cursor[leader] = sigs[0]["signature"]
         for entry in reversed(sigs):  # oldest first
             if entry.get("err") is not None:
                 continue
             _spawn(self._safe(leader, entry["signature"]))
+        return True
 
     async def _safe(self, leader: str, sig: str) -> None:
         try:

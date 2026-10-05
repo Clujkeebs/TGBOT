@@ -61,8 +61,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     ai_model: str = "claude-opus-5-5"
 
+    # --- Paper trading: simulate fills with real Jupiter quotes, no real SOL moves ---
+    paper_trading: bool = False
+    paper_start_sol: float = 10.0
+
     # --- Storage ---
     database_url: str = "sqlite+aiosqlite:///./data/copybot.db"
+    paper_database_url: str = "sqlite+aiosqlite:///./data/paper.db"
 
     # --- Misc ---
     config_path: str = "config.yaml"
@@ -120,6 +125,13 @@ class TradingDefaults(BaseModel):
     confirm_timeout_s: int = 30
     copy_sells: bool = True
     daily_summary_hour_utc: int = -1
+    min_liquidity_usd: float = 5000.0
+    require_mint_disabled: bool = True
+    require_freeze_disabled: bool = True
+    max_top_holders_pct: float = 0.0
+    min_token_age_min: float = 0.0
+    max_open_positions: int = 10
+    max_token_exposure_sol: float = 0.0
     ai_screen_buys: bool = True
     ai_autonomy: Literal["off", "advise", "manage"] = "advise"
     ai_review_hours: float = 6.0
@@ -148,6 +160,11 @@ def trading_defaults_from_yaml(data: dict) -> TradingDefaults:
     notify = data.get("notify") or {}
     if "daily_summary_hour_utc" in notify:
         raw["daily_summary_hour_utc"] = notify["daily_summary_hour_utc"]
+    filters = data.get("filters") or {}
+    for k in ("min_liquidity_usd", "require_mint_disabled", "require_freeze_disabled", "max_top_holders_pct",
+              "min_token_age_min"):
+        if k in filters:
+            raw[k] = filters[k]
     ai = data.get("ai") or {}
     for k_yaml, k in (("screen_buys", "ai_screen_buys"), ("autonomy", "ai_autonomy"),
                       ("review_hours", "ai_review_hours"), ("max_trade_sol", "ai_max_trade_sol")):

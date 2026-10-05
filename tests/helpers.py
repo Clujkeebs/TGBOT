@@ -58,6 +58,10 @@ class FakeRpc:
         self.sol_lamports = 2_000_000_000
         self.token_raw: dict[str, tuple[int, int]] = {}
         self.signatures: dict[str, list[dict]] = {}
+        self.mints: dict[str, dict] = {}
+
+    async def get_mint_info(self, mint):
+        return self.mints.get(mint, {"mintAuthority": None, "freezeAuthority": None, "decimals": 6})
 
     async def get_transaction(self, sig):
         return self.txs.get(sig)
@@ -77,8 +81,11 @@ class FakeRpc:
                 "mint": m, "tokenAmount": {"amount": str(raw), "decimals": dec}}}}}})
         return out
 
-    async def get_signatures_for_address(self, address, limit=20, until=None):
+    async def get_signatures_for_address(self, address, limit=20, until=None, before=None):
         sigs = self.signatures.get(address, [])
+        if before:
+            idx = [s["signature"] for s in sigs].index(before)
+            sigs = sigs[idx + 1:]
         out = []
         for s in sigs:
             if s["signature"] == until:
@@ -96,6 +103,10 @@ class FakeJupiter:
         self.fail = fail
         self.calls: list[tuple] = []
         self.prices = {WSOL_MINT: 150.0}
+        self.tokens: dict[str, dict] = {}
+
+    async def token_info(self, mint):
+        return self.tokens.get(mint, {"liquidity": 250_000.0})
 
     async def prices_usd(self, mints, max_age_s=10.0):
         return {m: self.prices[m] for m in mints if m in self.prices}

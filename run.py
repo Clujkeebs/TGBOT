@@ -105,17 +105,24 @@ async def main() -> None:
     logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
     yaml_cfg = load_yaml(settings.config_path)
-    db = Database(settings.database_url)
+    db = Database(settings.paper_database_url if settings.paper_trading else settings.database_url)
     await db.init(trading_defaults_from_yaml(yaml_cfg), yaml_cfg.get("leaders") or [], yaml_cfg.get("blacklist") or [])
 
     rpc = SolanaRpc(settings.solana_rpc_url)
     vault = KeyVault(settings.fernet_key)
-    wallet = WalletManager(db, rpc, vault)
+    if settings.paper_trading:
+        from bot.paper import PaperJupiter, PaperWallet
+
+        wallet = PaperWallet(db, settings.paper_start_sol)
+        jupiter = PaperJupiter(settings.jupiter_url, settings.jupiter_api_key, wallet=wallet)
+        log.warning("PAPER TRADING - simulated fills, no real SOL is used")
+    else:
+        wallet = WalletManager(db, rpc, vault)
+        jupiter = Jupiter(settings.jupiter_url, settings.jupiter_api_key)
     pubkey, created = await wallet.ensure_wallet()
 
     bot = Bot(settings.telegram_bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     notifier = Notifier(bot, settings.alert_chat_id)
-    jupiter = Jupiter(settings.jupiter_url, settings.jupiter_api_key)
     engine = CopyEngine(db, rpc, wallet, jupiter, notifier)
 
     stop = asyncio.Event()
@@ -143,7 +150,8 @@ async def main() -> None:
             log.error("Helius webhook sync failed: %s", e)
         ingest_desc = f"Helius webhook (:{settings.webhook_port})"
     else:
-        poller = LeaderPoller(db, rpc, engine.handle_leader_signature, settings.poll_interval_s)
+        poller = LeaderPoller(db, rpc, engine.handle_leader_signature, settings.poll_interval_s,
+                              alert=notifier.send)
         tasks.append(asyncio.create_task(poller.run(stop), name="poller"))
         ingest_desc = f"RPC polling every {settings.poll_interval_s:g}s"
 
@@ -172,7 +180,14 @@ async def main() -> None:
         bal = f"{sol:.4f} SOL"
     except Exception as e:  # noqa: BLE001
         bal = f"unknown ({e})"
-    hello = (f"🤖 <b>Copy bot started</b>\nWallet: <code>{pubkey}</code>{' (NEW - fund it!)' if created else ''}\n"
+    expired = await engine.expire_stale_confirmations()
+    if expired:
+        log.info("Expired %d confirmation(s) left over from before the restart", expired)
+    if settings.paper_trading:
+        wallet_line = "📝 <b>PAPER TRADING</b> - fake SOL, real prices. Set PAPER_TRADING=false to go live."
+    else:
+        wallet_line = f"Wallet: <code>{pubkey}</code>{' (NEW - fund it!)' if created else ''}"
+    hello = (f"🤖 <b>Copy bot started</b>\n{wallet_line}\n"
              f"Balance: {bal}\nMode: <b>{cfg.mode}</b>{' (paused)' if cfg.paused else ''} · "
              f"{len(leaders)} leader(s) · {ingest_desc}\n"
              f"AI manager: {cfg.ai_autonomy if ai else 'off (set ANTHROPIC_API_KEY)'}\n/help for commands")
